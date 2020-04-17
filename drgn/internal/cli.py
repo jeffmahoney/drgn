@@ -48,6 +48,9 @@ def main() -> None:
     version = f"drgn {drgn_version} (using Python {python_version}, {libkdumpfile})"
     parser = argparse.ArgumentParser(prog="drgn", description="Scriptable debugger")
 
+    parser.add_argument(
+        "-C", "--commands", action="store_true", help="enable command mode"
+    )
     program_group = parser.add_argument_group(
         title="program selection",
     ).add_mutually_exclusive_group()
@@ -126,8 +129,13 @@ def main() -> None:
     init_globals: Dict[str, Any] = {"prog": prog}
     if args.script:
         sys.argv = args.script
-        runpy.run_path(args.script[0], init_globals=init_globals, run_name="__main__")
-    else:
+        if args.commands:
+            sys.stdin = open(args.script[0])
+        else:
+            runpy.run_path(args.script[0], init_globals=init_globals, run_name="__main__")
+            sys.exit(0)
+
+    if True:
         import atexit
         import readline
 
@@ -184,4 +192,11 @@ For help, type help(drgn).
             module = importlib.import_module("drgn.helpers.linux")
             for name in module.__dict__["__all__"]:
                 init_globals[name] = getattr(module, name)
-        code.interact(banner=banner, exitmsg="", local=init_globals)
+
+        console = code.InteractiveConsole
+
+        if args.commands:
+            from drgn.commands.console import CommandConsole
+            console = CommandConsole
+
+        console(init_globals).interact(banner=banner, exitmsg="")
