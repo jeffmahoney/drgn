@@ -7,10 +7,13 @@ Linked Lists
 
 The ``drgn.helpers.linux.list`` module provides helpers for working with the
 doubly-linked list implementations (``struct list_head`` and ``struct
-hlist_head``) in :linux:`include/linux/list.h`.
+hlist_head``) in :linux:`include/linux/list.h` and ``struct klist`` in
+:linux:`include/linux/klist.h`.
 """
 
-from drgn import NULL, container_of
+from typing import Iterable, Union
+
+from drgn import NULL, container_of, Object, Type
 
 
 __all__ = (
@@ -28,8 +31,13 @@ __all__ = (
     "list_last_entry",
     "list_next_entry",
     "list_prev_entry",
+    "klist_for_each",
+    "klist_for_each_entry",
+    "ListCorruptionError",
 )
 
+class ListCorruptionError(ValueError):
+    """List corruption was detected during iteration"""
 
 def list_empty(head):
     """
@@ -200,3 +208,32 @@ def hlist_for_each_entry(type, head, member):
     """
     for pos in hlist_for_each(head):
         yield container_of(pos, type, member)
+
+def klist_for_each(klist: Object) -> Iterable[Object]:
+    """
+    .. c:function:: klist_for_each(struct klist *klist)
+
+    Iterate over all of the nodes in a klist.
+
+    :return: Iterator of ``struct klist_node *`` objects.
+    """
+
+    for node in list_for_each_entry(
+            'struct klist_node', klist.k_list.address_of_(), 'n_node'
+    ):
+        if node.n_klist != klist:
+            raise CorruptedListError("node does not point back to klist")
+        yield node
+
+def klist_for_each_entry(type: Union[str, Type], klist: Object,
+                         member: str) -> Iterable[Object]:
+    """
+    .. c:function:: klist_for_each_entry(type, struct klist *klist, member)
+
+    Iterate over all of the entries in a klist, given the type of the entry
+    and the ``struct klist_node`` member in that type.
+
+    :return: Iterator of ``type *`` objects.
+    """
+    for node in klist_for_each(klist):
+        yield container_of(node, type, member)
