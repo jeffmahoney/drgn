@@ -10,14 +10,17 @@ Linux block layer, including disks (``struct gendisk``) and partitions
 (``struct hd_struct``).
 """
 
-from drgn import container_of
+from typing import Optional
+
+from drgn import container_of, Object
 from drgn.helpers import escape_ascii_string
 from drgn.helpers.linux.device import MAJOR, MINOR, MKDEV
-from drgn.helpers.linux.list import list_for_each_entry
+from drgn.helpers.linux.device import for_each_class_device
 
 __all__ = (
     "disk_devt",
     "disk_name",
+    "for_each_block_device",
     "for_each_disk",
     "for_each_partition",
     "part_devt",
@@ -47,25 +50,8 @@ def disk_name(disk):
     return disk.disk_name.string_()
 
 
-def _for_each_block_device(prog):
-    try:
-        class_in_private = prog.cache["knode_class_in_device_private"]
-    except KeyError:
-        # We need a proper has_member(), but this is fine for now.
-        class_in_private = any(
-            member.name == "knode_class"
-            for member in prog.type("struct device_private").members
-        )
-        prog.cache["knode_class_in_device_private"] = class_in_private
-    devices = prog["block_class"].p.klist_devices.k_list.address_of_()
-    if class_in_private:
-        for device_private in list_for_each_entry(
-            "struct device_private", devices, "knode_class.n_node"
-        ):
-            yield device_private.device
-    else:
-        yield from list_for_each_entry("struct device", devices, "knode_class.n_node")
-
+def for_each_block_device(prog, subtype: Optional[Object]=None):
+    yield from for_each_class_device(prog, prog["block_class"], subtype)
 
 def for_each_disk(prog):
     """
@@ -74,10 +60,9 @@ def for_each_disk(prog):
     :return: Iterator of ``struct gendisk *`` objects.
     """
     disk_type = prog["disk_type"].address_of_()
-    for device in _for_each_block_device(prog):
-        if device.type == disk_type:
-            yield container_of(device, "struct gendisk", "part0.__dev")
 
+    for device in for_each_block_device(prog, disk_type):
+        yield container_of(device, "struct gendisk", "part0.__dev")
 
 def print_disks(prog):
     """Print all of the disks in the system."""
