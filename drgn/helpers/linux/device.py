@@ -9,7 +9,9 @@ The ``drgn.helpers.linux.device`` module provides helpers for working with
 Linux devices, including the kernel encoding of ``dev_t``.
 """
 
-from drgn import Object, cast
+from typing import Optional, Iterable
+from drgn import Program, Object, cast
+from drgn.helpers.linux.list import klist_for_each_entry
 
 __all__ = (
     "MAJOR",
@@ -57,3 +59,28 @@ def MKDEV(major, minor):
     if isinstance(dev, Object):
         return cast("dev_t", dev)
     return dev
+
+def for_each_class_device(prog: Program, class_struct: Object,
+                          subtype: Optional[Object] = None) -> Iterable[Object]:
+    try:
+        class_in_private = prog.cache["knode_class_in_device_private"]
+    except KeyError:
+        # We need a proper has_member(), but this is fine for now.
+        class_in_private = any(
+            member.name == "knode_class"
+            for member in prog.type("struct device_private").members
+        )
+        prog.cache["knode_class_in_device_private"] = class_in_private
+    devices = class_struct.p.klist_devices.address_of_()
+
+    if class_in_private:
+        container_type = "struct device_private"
+    else:
+        container_type = "struct device"
+
+    for device in klist_for_each_entry(container_type, devices, "knode_class"):
+        if class_in_private:
+            device = device.dev
+
+        if subtype is None or subtype == device.type:
+            yield device
