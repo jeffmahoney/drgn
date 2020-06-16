@@ -21,6 +21,7 @@
 #include "read.h"
 #include "siphash.h"
 #include "string_builder.h"
+#include "binary_search_tree.h"
 
 DEFINE_VECTOR_FUNCTIONS(dwfl_module_vector)
 DEFINE_VECTOR_FUNCTIONS(drgn_dwarf_module_vector)
@@ -164,6 +165,7 @@ enum {
 	SECTION_DEBUG_ABBREV,
 	SECTION_DEBUG_STR,
 	SECTION_DEBUG_LINE,
+	SECTION_DEBUG_FRAME,
 	DRGN_DWARF_INDEX_NUM_SECTIONS,
 };
 
@@ -172,6 +174,7 @@ static const char * const section_name[DRGN_DWARF_INDEX_NUM_SECTIONS] = {
 	[SECTION_DEBUG_ABBREV] = ".debug_abbrev",
 	[SECTION_DEBUG_STR] = ".debug_str",
 	[SECTION_DEBUG_LINE] = ".debug_line",
+	[SECTION_DEBUG_FRAME] = ".debug_frame",
 };
 
 /*
@@ -308,6 +311,23 @@ struct drgn_dwarf_index_die {
 	Dwfl_Module *module;
 	uint64_t offset;
 };
+
+/*
+ * This is not meant to find a matching address range.  It's meant to locate
+ * the range that contains an address.
+ */
+static int address_range_cmp(const struct address_range * target,
+			     const struct address_range * entry)
+{
+	if (target->start < entry->start)
+		return -1;
+	else if (target->start > entry->end)
+		return 1;
+	return 0;
+}
+
+DEFINE_BINARY_SEARCH_TREE_FUNCTIONS(drgn_dwarf_block_tree,
+				    address_range_cmp, splay)
 
 /*
  * The key is the DIE name. The value is the first DIE with that name (as an
@@ -1917,6 +1937,103 @@ static bool append_die_entry(struct drgn_dwarf_index_shard *shard, uint64_t tag,
 	return true;
 }
 
+static inline void dwfl_module_range(Dwfl_Module *module, uint64_t *start,
+				     uint64_t *end, uint64_t *bias)
+{
+	dwfl_module_info(module, NULL, start, end, bias, NULL, NULL, NULL);
+}
+
+static struct drgn_error *high_pc_from_abstract(Dwfl_Module *module,
+						uint64_t offset,
+						uint64_t *high_pc)
+{
+	Dwarf *dwarf;
+	Dwarf_Die orig;
+	Dwarf_Attribute attr_mem, *attr;
+	Dwarf_Addr address;
+	Dwarf_Word uvalue;
+	uint64_t bias;
+
+
+	dwarf = dwfl_module_getdwarf(module, &bias);
+	if (!dwarf)
+		return drgn_error_libdwfl();
+
+	if (!dwarf_offdie(dwarf, offset, &orig))
+		return drgn_error_libdw();
+
+	attr = dwarf_attr_integrate(&orig, DW_AT_high_pc, &attr_mem);
+	if (!attr)
+		return drgn_error_libdw();
+
+	if (!dwarf_formaddr(attr, &address)) {
+		*high_pc = address;
+		return NULL;
+	} else if (!dwarf_formudata(attr, &uvalue)) {
+		*high_pc = uvalue;
+		return NULL;
+	}
+
+	/*
+	 * If it's not an address and not a constant,
+	 * it violates spec.
+	 */
+	return drgn_error_libdw();
+
+}
+
+static struct drgn_error *index_block(struct drgn_dwarf_index *dindex,
+				      Dwfl_Module *module, uint64_t offset,
+				      uint64_t low_pc, uint64_t high_pc)
+{
+	struct drgn_error *err;
+	struct drgn_dwarf_block_die *block_entry;
+	uint64_t start, end, bias;
+	uint64_t abstract_pc;
+
+	if (!high_pc) {
+		err = high_pc_from_abstract(module, offset, &abstract_pc);
+		if (err)
+			return err;
+		high_pc = abstract_pc;
+	}
+
+	if (high_pc < low_pc) {
+		if (__builtin_add_overflow(low_pc, high_pc - 1, &high_pc)) {
+			return drgn_error_create(DRGN_ERROR_OVERFLOW,
+					 "block end address is too large");
+		}
+	}
+
+	dwfl_module_range(module, &start, &end, &bias);
+
+	/**
+	 * Modules have debuginfo for e.g. the .init and .exit sections
+	 * that will have been unloaded after use.  These will not have been
+	 * relocated and will cause tree insertion collisions.
+	 */
+	if (low_pc + bias < start)
+		return NULL;
+
+	block_entry = malloc(sizeof(*block_entry));
+	if (!block_entry)
+		return &drgn_enomem;
+
+	block_entry->range.start = low_pc + bias;
+	block_entry->range.end = high_pc + bias;
+	block_entry->module = module;
+	block_entry->offset = offset;
+
+	if (!drgn_dwarf_block_tree_insert(&dindex->block_tree,
+					  block_entry, NULL)) {
+		free(block_entry);
+		return drgn_error_create(DRGN_ERROR_OTHER,
+				"block already exists at address");
+	}
+
+	return NULL;
+}
+
 static struct drgn_error *index_die(struct drgn_dwarf_index *dindex,
 				    const char *name, uint64_t tag,
 				    uint64_t file_name_hash,
@@ -2319,6 +2436,16 @@ static struct drgn_error *index_cu(struct drgn_dwarf_index *dindex,
 						     die_offset)))
 					goto out;
 			}
+
+			if (tag == DW_TAG_subprogram) {
+			    if (die.low_pc != ~0ULL &&
+			     (die.high_pc || die.has_abstract_origin)) {
+				if ((err = index_block(dindex, cu->module,
+						       die_offset, die.low_pc,
+						       die.high_pc)))
+					goto out;
+			     }
+			}
 		}
 
 next:
@@ -2618,5 +2745,40 @@ drgn_dwarf_index_iterator_next(struct drgn_dwarf_index_iterator *it,
 		return drgn_error_libdw();
 	if (bias_ret)
 		*bias_ret = bias;
+	return NULL;
+}
+
+struct drgn_error *
+drgn_dwarf_index_block_find(struct drgn_dwarf_index *dindex,
+			    uint64_t address, Dwarf_Die *die_ret,
+			    uint64_t *bias_ret)
+{
+	Dwarf *dwarf;
+	uint64_t bias;
+	struct drgn_dwarf_block_tree_iterator it;
+	struct drgn_dwarf_block_die *block;
+	const struct address_range range = {
+		.start = address,
+		.end = address,
+	};
+
+	it = drgn_dwarf_block_tree_search(&dindex->block_tree, &range);
+	if (!it.entry)
+		return drgn_error_format(DRGN_ERROR_LOOKUP,
+					 "no block found in debuginfo for %lx",
+					 address);
+
+	block = it.entry;
+
+	dwarf = dwfl_module_getdwarf(block->module, &bias);
+	if (!dwarf)
+		return drgn_error_libdwfl();
+
+	if (!dwarf_offdie(dwarf, block->offset, die_ret))
+		return drgn_error_libdw();
+
+	if (bias_ret)
+		*bias_ret = bias;
+
 	return NULL;
 }

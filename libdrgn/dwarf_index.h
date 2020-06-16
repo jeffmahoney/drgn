@@ -31,6 +31,7 @@ typedef struct {} omp_lock_t;
 #include "hash_table.h"
 #include "string_builder.h"
 #include "vector.h"
+#include "binary_search_tree.h"
 
 /**
  * @ingroup Internals
@@ -158,6 +159,26 @@ DEFINE_HASH_TABLE_TYPE(drgn_dwarf_module_table, struct drgn_dwarf_module *,
 
 DEFINE_HASH_SET_TYPE(c_string_set, const char *)
 
+struct drgn_dwarf_block_die {
+	struct binary_tree_node node;
+	struct address_range {
+		uint64_t start;
+		uint64_t end;
+	} range;
+	Dwfl_Module *module;
+	uint64_t offset;
+};
+
+static inline const struct address_range
+drgn_dwarf_block_die_to_key(const struct drgn_dwarf_block_die *die)
+{
+	return die->range;
+}
+
+DEFINE_BINARY_SEARCH_TREE_TYPE(drgn_dwarf_block_tree,
+			       struct drgn_dwarf_block_die, node,
+			       drgn_dwarf_block_die_to_key)
+
 /**
  * Fast index of DWARF debugging information.
  *
@@ -175,6 +196,12 @@ struct drgn_dwarf_index {
 	 * This is sharded to reduce lock contention.
 	 */
 	struct drgn_dwarf_index_shard shards[1 << DRGN_DWARF_INDEX_SHARD_BITS];
+
+	/**
+	 * Block tree, lookup by address in range
+	 */
+	struct drgn_dwarf_block_tree block_tree;
+
 	Dwfl *dwfl;
 	/**
 	 * Formatted errors reported by @ref drgn_dwarf_index_report_error().
@@ -379,6 +406,10 @@ void drgn_dwarf_index_iterator_init(struct drgn_dwarf_index_iterator *it,
 struct drgn_error *
 drgn_dwarf_index_iterator_next(struct drgn_dwarf_index_iterator *it,
 			       Dwarf_Die *die_ret, uint64_t *bias_ret);
+struct drgn_error *
+drgn_dwarf_index_block_find(struct drgn_dwarf_index *dindex,
+			    uint64_t address, Dwarf_Die *die_ret,
+			    uint64_t *bias_ret);
 
 /** @} */
 
