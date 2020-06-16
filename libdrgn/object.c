@@ -24,6 +24,8 @@ void drgn_object_init(struct drgn_object *obj, struct drgn_program *prog)
 	obj->kind = DRGN_OBJECT_NONE;
 	obj->is_reference = true;
 	obj->is_bit_field = false;
+	obj->needs_stack_evaluation = false;
+	obj->borrowed_stack_object = false;
 	obj->reference.address = 0;
 	obj->reference.bit_offset = 0;
 	/* The endianness doesn't matter, so just use the host endianness. */
@@ -34,7 +36,7 @@ void drgn_object_init(struct drgn_object *obj, struct drgn_program *prog)
 static void drgn_value_deinit(const struct drgn_object *obj,
 			      const union drgn_value *value)
 {
-	if (obj->kind == DRGN_OBJECT_BUFFER &&
+	if (obj->kind == DRGN_OBJECT_BUFFER && !obj->borrowed_stack_object &&
 	    !drgn_buffer_object_is_inline(obj))
 		free(value->bufp);
 }
@@ -483,12 +485,66 @@ drgn_object_copy(struct drgn_object *res, const struct drgn_object *obj)
 }
 
 static struct drgn_error *
+drgn_stack_frame_object_evaluate(struct drgn_object *new_obj,
+				 const struct drgn_object *obj)
+{
+	Dwarf_Addr address;
+	struct drgn_error *err;
+	struct drgn_qualified_type qualified_type = {
+		.type = obj->type,
+		.qualifiers = obj->qualifiers,
+	};
+	bool is_reference;
+
+	if (!obj->needs_stack_evaluation)
+		return drgn_error_format(DRGN_ERROR_OTHER,
+					 "object is not a stack object");
+
+	err = drgn_stack_frame_object_location(obj, &address, &is_reference);
+	if (err)
+		return err;
+
+	if (is_reference || obj->kind == DRGN_OBJECT_BUFFER)
+		return drgn_object_set_reference(new_obj, qualified_type,
+					 address, 0, 0, DRGN_PROGRAM_ENDIAN);
+
+	switch (obj->kind) {
+	case DRGN_OBJECT_SIGNED:
+		err = drgn_object_set_signed(new_obj, qualified_type,
+					     address, 0);
+		break;
+	case DRGN_OBJECT_UNSIGNED:
+		err = drgn_object_set_unsigned(new_obj, qualified_type,
+					       address, 0);
+		break;
+	case DRGN_OBJECT_FLOAT:
+		err = drgn_object_set_float(new_obj, qualified_type,
+					    (double)address);
+		break;
+	default:
+		abort();
+	}
+	return err;
+}
+
+static struct drgn_error *
 drgn_object_slice_internal(struct drgn_object *res,
 			   const struct drgn_object *obj,
 			   struct drgn_object_type *type,
 			   enum drgn_object_kind kind, uint64_t bit_size,
 			   uint64_t bit_offset)
 {
+	struct drgn_error *err;
+	struct drgn_object tmp;
+
+	if (obj->needs_stack_evaluation) {
+		drgn_object_init(&tmp, obj->prog);
+		err = drgn_stack_frame_object_evaluate(&tmp, obj);
+		if (err)
+			return err;
+		obj = &tmp;
+	}
+
 	if (obj->is_reference) {
 		if (obj->kind != DRGN_OBJECT_BUFFER &&
 		    obj->kind != DRGN_OBJECT_INCOMPLETE_BUFFER) {
@@ -532,6 +588,7 @@ drgn_object_slice(struct drgn_object *res, const struct drgn_object *obj,
 		  struct drgn_qualified_type qualified_type,
 		  uint64_t bit_offset, uint64_t bit_field_size)
 {
+	struct drgn_object tmp;
 	struct drgn_error *err;
 	struct drgn_object_type type;
 	enum drgn_object_kind kind;
@@ -542,10 +599,19 @@ drgn_object_slice(struct drgn_object *res, const struct drgn_object *obj,
 					 "objects are from different programs");
 	}
 
+	if (obj->needs_stack_evaluation) {
+		drgn_object_init(&tmp, obj->prog);
+		err = drgn_stack_frame_object_evaluate(&tmp, obj);
+		if (err)
+			return err;
+		obj = &tmp;
+	}
+
 	err = drgn_object_set_common(qualified_type, bit_field_size, &type,
 				     &kind, &bit_size);
 	if (err)
 		return err;
+
 	return drgn_object_slice_internal(res, obj, &type, kind, bit_size,
 					  bit_offset);
 }
@@ -635,6 +701,15 @@ LIBDRGN_PUBLIC struct drgn_error *
 drgn_object_read(struct drgn_object *res, const struct drgn_object *obj)
 {
 	struct drgn_error *err;
+	struct drgn_object tmp;
+
+	if (obj->needs_stack_evaluation) {
+		drgn_object_init(&tmp, obj->prog);
+		err = drgn_stack_frame_object_evaluate(&tmp, obj);
+		if (err)
+			return err;
+		obj = &tmp;
+	}
 
 	if (obj->is_reference) {
 		union drgn_value value;
@@ -661,6 +736,15 @@ drgn_object_read_value(const struct drgn_object *obj, union drgn_value *value,
 		       const union drgn_value **ret)
 {
 	struct drgn_error *err;
+	struct drgn_object tmp;
+
+	if (obj->needs_stack_evaluation) {
+		drgn_object_init(&tmp, obj->prog);
+		err = drgn_stack_frame_object_evaluate(&tmp, obj);
+		if (err)
+			return err;
+		obj = &tmp;
+	}
 
 	if (obj->is_reference) {
 		err = drgn_object_read_reference(obj, value);
@@ -668,7 +752,11 @@ drgn_object_read_value(const struct drgn_object *obj, union drgn_value *value,
 			return err;
 		*ret = value;
 	} else {
-		*ret = &obj->value;
+		if (obj == &tmp) {
+			*value = tmp.value;
+			*ret = value;
+		} else
+			*ret = &obj->value;
 	}
 	return NULL;
 }
