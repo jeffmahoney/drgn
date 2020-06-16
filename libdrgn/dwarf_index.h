@@ -407,6 +407,16 @@ void drgn_dwarf_index_iterator_init(struct drgn_dwarf_index_iterator *it,
 struct drgn_error *
 drgn_dwarf_index_iterator_next(struct drgn_dwarf_index_iterator *it,
 			       Dwarf_Die *die_ret, uint64_t *bias_ret);
+/**
+ * Get the matching DIE for the function containing the @p address
+ *
+ * @param[in] dindex the drgn_dwarf_index to search.
+ * @param[out] die_ret Returned DIE.
+ * @param[out] bias_ret Returned difference between addresses in the loaded
+ * module and addresses in the debugging information. This may be @c NULL if it
+ * is not needed.
+ * @return @c NULL on success, non-@c NULL on error.
+ */
 struct drgn_error *
 drgn_dwarf_index_block_find(struct drgn_dwarf_index *dindex,
 			    uint64_t address, Dwarf_Die *die_ret,
