@@ -185,7 +185,7 @@ static const char * const section_name[DRGN_DWARF_INDEX_NUM_SECTIONS] = {
  * tag is not of interest).
  */
 enum {
-	INSN_MAX_SKIP = 229,
+	INSN_MAX_SKIP = 216,
 	ATTRIB_BLOCK1,
 	ATTRIB_BLOCK2,
 	ATTRIB_BLOCK4,
@@ -212,7 +212,20 @@ enum {
 	ATTRIB_SPECIFICATION_REF4,
 	ATTRIB_SPECIFICATION_REF8,
 	ATTRIB_SPECIFICATION_REF_UDATA,
-	ATTRIB_MAX_INSN = ATTRIB_SPECIFICATION_REF_UDATA,
+	ATTRIB_LOW_PC_ADDR,
+	ATTRIB_HIGH_PC_ADDR,
+	ATTRIB_HIGH_PC_DATA1,
+	ATTRIB_HIGH_PC_DATA2,
+	ATTRIB_HIGH_PC_DATA4,
+	ATTRIB_HIGH_PC_DATA8,
+	ATTRIB_HIGH_PC_UDATA,
+	ATTRIB_ABSTRACT_ORIGIN_REF_ADDR,
+	ATTRIB_ABSTRACT_ORIGIN_REF1,
+	ATTRIB_ABSTRACT_ORIGIN_REF2,
+	ATTRIB_ABSTRACT_ORIGIN_REF4,
+	ATTRIB_ABSTRACT_ORIGIN_REF8,
+	ATTRIB_ABSTRACT_ORIGIN_REF_UDATA,
+	ATTRIB_MAX_INSN = ATTRIB_ABSTRACT_ORIGIN_REF_UDATA,
 };
 
 enum {
@@ -261,6 +274,7 @@ struct compilation_unit {
 	uint64_t unit_length;
 	uint64_t debug_abbrev_offset;
 	uint8_t address_size;
+	uint8_t offset_size;
 	bool is_64_bit;
 	bool bswap;
 };
@@ -351,6 +365,38 @@ static inline struct drgn_error *read_uleb128(const char **ptr, const char *end,
 			break;
 	}
 	return NULL;
+}
+
+static inline struct drgn_error *
+read_size_into_u64(struct compilation_unit *cu, const char **ptr,
+		   const char *end, uint64_t *value, uint8_t size)
+{
+	bool ret;
+
+	if (size == 4)
+		ret = read_u32_into_u64(ptr, end, cu->bswap, value);
+	else if (size == 8)
+		ret = read_u64_into_u64(ptr, end, cu->bswap, value);
+	else
+		return drgn_error_create(DRGN_ERROR_OTHER,
+					 "size must be 4 or 8 bytes");
+	if (!ret)
+		return drgn_eof();
+	return NULL;
+}
+
+static inline struct drgn_error *
+read_cu_offset_into_u64(struct compilation_unit *cu, const char **ptr,
+			const char *end, uint64_t *value)
+{
+	return read_size_into_u64(cu, ptr, end, value, cu->offset_size);
+}
+
+static inline struct drgn_error *
+read_addr_into_u64(struct compilation_unit *cu, const char **ptr,
+		   const char *end, uint64_t *value)
+{
+	return read_size_into_u64(cu, ptr, end, value, cu->address_size);
 }
 
 static inline struct drgn_error *read_uleb128_into_size_t(const char **ptr,
@@ -1176,8 +1222,10 @@ static struct drgn_error *read_compilation_unit_header(const char *ptr,
 	if (cu->is_64_bit) {
 		if (!read_u64(&ptr, end, cu->bswap, &cu->unit_length))
 			return drgn_eof();
+		cu->offset_size = 8;
 	} else {
 		cu->unit_length = tmp;
+		cu->offset_size = 4;
 	}
 
 	if (!read_u16(&ptr, end, cu->bswap, &version))
@@ -1543,6 +1591,60 @@ static struct drgn_error *read_abbrev_decl(const char **ptr, const char *end,
 			default:
 				break;
 			}
+		} else if (name == DW_AT_low_pc && should_index) {
+			switch (form) {
+			case DW_FORM_addr:
+				insn = ATTRIB_LOW_PC_ADDR;
+				goto append_insn;
+			default:
+				break;
+			};
+		} else if (name == DW_AT_high_pc && should_index) {
+			switch (form) {
+			case DW_FORM_addr:
+				insn = ATTRIB_HIGH_PC_ADDR;
+				goto append_insn;
+			case DW_FORM_udata:
+				insn = ATTRIB_HIGH_PC_UDATA;
+				goto append_insn;
+			case DW_FORM_data1:
+				insn = ATTRIB_HIGH_PC_DATA1;
+				goto append_insn;
+			case DW_FORM_data2:
+				insn = ATTRIB_HIGH_PC_DATA2;
+				goto append_insn;
+			case DW_FORM_data4:
+				insn = ATTRIB_HIGH_PC_DATA4;
+				goto append_insn;
+			case DW_FORM_data8:
+				insn = ATTRIB_HIGH_PC_DATA8;
+				goto append_insn;
+			default:
+				break;
+			};
+		} else if (name == DW_AT_abstract_origin && should_index) {
+			switch (form) {
+			case DW_FORM_ref_addr:
+				insn = ATTRIB_ABSTRACT_ORIGIN_REF_ADDR;
+				goto append_insn;
+			case DW_FORM_ref1:
+				insn = ATTRIB_ABSTRACT_ORIGIN_REF1;
+				goto append_insn;
+			case DW_FORM_ref2:
+				insn = ATTRIB_ABSTRACT_ORIGIN_REF2;
+				goto append_insn;
+			case DW_FORM_ref4:
+				insn = ATTRIB_ABSTRACT_ORIGIN_REF4;
+				goto append_insn;
+			case DW_FORM_ref8:
+				insn = ATTRIB_ABSTRACT_ORIGIN_REF8;
+				goto append_insn;
+			case DW_FORM_ref_udata:
+				insn = ATTRIB_ABSTRACT_ORIGIN_REF_UDATA;
+				goto append_insn;
+			default:
+				break;
+			}
 		}
 
 		switch (form) {
@@ -1884,7 +1986,10 @@ struct die {
 	const char *name;
 	size_t stmt_list;
 	size_t decl_file;
+	uint64_t low_pc;
+	uint64_t high_pc;
 	const char *specification;
+	bool has_abstract_origin;
 	uint8_t flags;
 };
 
@@ -2040,6 +2145,66 @@ specification:
 			die->specification = &cu->ptr[tmp];
 			__builtin_prefetch(die->specification);
 			break;
+		case ATTRIB_LOW_PC_ADDR:
+			if ((err = read_addr_into_u64(cu, ptr, end,
+						      &die->low_pc)))
+				return err;
+			break;
+		case ATTRIB_HIGH_PC_ADDR:
+			if ((err = read_addr_into_u64(cu, ptr, end,
+						      &die->high_pc)))
+				return err;
+			break;
+		case ATTRIB_HIGH_PC_DATA1:
+			if (!read_u8_into_size_t(ptr, end, &die->high_pc))
+				return drgn_eof();
+			break;
+		case ATTRIB_HIGH_PC_DATA2:
+			if (!read_u16_into_size_t(ptr, end, cu->bswap,
+						  &die->high_pc))
+				return drgn_eof();
+			break;
+		case ATTRIB_HIGH_PC_DATA4:
+			if (!read_u32_into_size_t(ptr, end, cu->bswap,
+						  &die->high_pc))
+				return drgn_eof();
+			break;
+		case ATTRIB_HIGH_PC_DATA8:
+			if (!read_u64_into_size_t(ptr, end, cu->bswap,
+						  &die->high_pc))
+				return drgn_eof();
+			break;
+		case ATTRIB_HIGH_PC_UDATA:
+			if ((err = read_uleb128_into_size_t(ptr, end,
+							    &die->high_pc)))
+				return err;
+			break;
+		case ATTRIB_ABSTRACT_ORIGIN_REF_ADDR:
+			if ((err = read_cu_offset_into_u64(cu, ptr, end, &tmp)))
+				return err;
+			goto abstract_origin;
+		case ATTRIB_ABSTRACT_ORIGIN_REF1:
+			if (!read_u8_into_size_t(ptr, end, &tmp))
+				return drgn_eof();
+			goto abstract_origin;
+		case ATTRIB_ABSTRACT_ORIGIN_REF2:
+			if (!read_u16_into_size_t(ptr, end, cu->bswap, &tmp))
+				return drgn_eof();
+			goto abstract_origin;
+		case ATTRIB_ABSTRACT_ORIGIN_REF4:
+			if (!read_u32_into_size_t(ptr, end, cu->bswap, &tmp))
+				return drgn_eof();
+			goto abstract_origin;
+		case ATTRIB_ABSTRACT_ORIGIN_REF8:
+			if (!read_u64_into_size_t(ptr, end, cu->bswap, &tmp))
+				return drgn_eof();
+			goto abstract_origin;
+		case ATTRIB_ABSTRACT_ORIGIN_REF_UDATA:
+			if ((err = read_uleb128_into_size_t(ptr, end, &tmp)))
+				return err;
+abstract_origin:
+			die->has_abstract_origin = true;
+			break;
 		default:
 			skip = insn;
 skip:
@@ -2083,6 +2248,7 @@ static struct drgn_error *index_cu(struct drgn_dwarf_index *dindex,
 
 	for (;;) {
 		struct die die = {
+			.low_pc = ~0ULL,
 			.stmt_list = SIZE_MAX,
 		};
 		uint64_t die_offset = ptr - debug_info_buffer;
