@@ -738,6 +738,20 @@ drgn_program_load_debug_info(struct drgn_program *prog, const char **paths,
 	return err;
 }
 
+LIBDRGN_PUBLIC struct drgn_error *
+drgn_program_block_find(struct drgn_program *prog, uint64_t address,
+			Dwarf_Die *die_ret, uint64_t *bias_ret)
+{
+	struct drgn_error *err;
+	struct drgn_dwarf_index *dindex;
+
+	err = drgn_program_get_dindex(prog, &dindex);
+	if (err)
+		return err;
+
+	return drgn_dwarf_index_block_find(dindex, address, die_ret, bias_ret);
+}
+
 struct drgn_error *drgn_program_cache_prstatus_entry(struct drgn_program *prog,
 						     char *data, size_t size)
 {

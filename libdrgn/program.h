@@ -230,6 +230,10 @@ bool drgn_program_find_symbol_by_address_internal(struct drgn_program *prog,
 						  Dwfl_Module *module,
 						  struct drgn_symbol *ret);
 
+struct drgn_error *drgn_program_block_find(struct drgn_program *prog,
+					   uint64_t address,
+					   Dwarf_Die *die_ret,
+					   uint64_t *bias_ret);
 /** @} */
 
 #endif /* DRGN_PROGRAM_H */
