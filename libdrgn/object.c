@@ -24,6 +24,7 @@ void drgn_object_init(struct drgn_object *obj, struct drgn_program *prog)
 	obj->kind = DRGN_OBJECT_NONE;
 	obj->is_reference = true;
 	obj->is_bit_field = false;
+	obj->needs_stack_evaluation = false;
 	obj->reference.address = 0;
 	obj->reference.bit_offset = 0;
 	/* The endianness doesn't matter, so just use the host endianness. */
@@ -489,6 +490,14 @@ drgn_object_slice_internal(struct drgn_object *res,
 			   enum drgn_object_kind kind, uint64_t bit_size,
 			   uint64_t bit_offset)
 {
+	struct drgn_error *err;
+
+	if (obj->needs_stack_evaluation) {
+		err = drgn_stack_frame_object_evaluate(obj);
+		if (err)
+			return err;
+	}
+
 	if (obj->is_reference) {
 		if (obj->kind != DRGN_OBJECT_BUFFER &&
 		    obj->kind != DRGN_OBJECT_INCOMPLETE_BUFFER) {
@@ -636,6 +645,12 @@ drgn_object_read(struct drgn_object *res, const struct drgn_object *obj)
 {
 	struct drgn_error *err;
 
+	if (obj->needs_stack_evaluation) {
+		err = drgn_stack_frame_object_evaluate(obj);
+		if (err)
+			return err;
+	}
+
 	if (obj->is_reference) {
 		union drgn_value value;
 
@@ -661,6 +676,12 @@ drgn_object_read_value(const struct drgn_object *obj, union drgn_value *value,
 		       const union drgn_value **ret)
 {
 	struct drgn_error *err;
+
+	if (obj->needs_stack_evaluation) {
+		err = drgn_stack_frame_object_evaluate(obj);
+		if (err)
+			return err;
+	}
 
 	if (obj->is_reference) {
 		err = drgn_object_read_reference(obj, value);

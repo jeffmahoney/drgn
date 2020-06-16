@@ -662,6 +662,13 @@ static PyObject *DrgnObject_array_value(struct drgn_object *obj,
 	if (!list)
 		return NULL;
 
+	err = drgn_stack_frame_object_evaluate(obj);
+	if (err) {
+		set_drgn_error(err);
+		Py_DECREF(list);
+		return NULL;
+	}
+
 	drgn_object_init(&element, obj->prog);
 	for (i = 0; i < length; i++) {
 		PyObject *element_value;
